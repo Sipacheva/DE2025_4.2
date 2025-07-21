@@ -1,0 +1,100 @@
+-- Создание таблиц
+
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    email TEXT,
+    role TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE users_audit (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    changed_by TEXT,
+    field_changed TEXT,
+    old_value TEXT,
+    new_value TEXT
+);
+
+-- Создание функции логирования изменений по трем полям
+CREATE OR REPLACE FUNCTION log_user_update()
+RETURNS TRIGGER AS $$
+DECLARE
+BEGIN
+	IF NEW.name IS DISTINCT FROM OLD.name THEN
+    	INSERT INTO users_audit(user_id,  field_changed, old_value, new_value, changed_by)
+    	VALUES (OLD.id, 'name', OLD.name, NEW.name, current_user);
+	END IF;
+
+	IF NEW.email IS DISTINCT FROM OLD.email THEN
+    	INSERT INTO users_audit(user_id,  field_changed, old_value, new_value, changed_by)
+    	VALUES (OLD.id, 'email', OLD.email, NEW.email, current_user);
+	END IF;
+
+	IF NEW.role IS DISTINCT FROM OLD.role THEN
+    	INSERT INTO users_audit(user_id,  field_changed, old_value, new_value, changed_by)
+    	VALUES (OLD.id, 'role', OLD.role, NEW.role, current_user);
+	END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+--Создание триггера на таблицу users
+CREATE TRIGGER trigger_log_user_update
+BEFORE UPDATE ON users
+FOR EACH ROW
+EXECUTE FUNCTION log_user_update();
+
+--Заполнение данными таблицы users
+INSERT INTO users (name, email, role)
+VALUES ('Alice', 'alice@example.com', 'user');
+
+INSERT INTO users (name, email, role)
+VALUES ('Ivan', 'ivan@example.com', 'user');
+
+-- Проверка содержимого таблицы users
+-- SELECT * FROM users;
+
+-- Обновление таблицы users
+UPDATE users SET name = 'Alice Ivanova', email = 'alice.ivanova@example.com', ROLE = 'admin' WHERE id = 1;
+UPDATE users SET name = 'Ivan Petrov1', email = 'ivan.petrov@example.com', ROLE = 'admin' WHERE id = 2;
+
+-- Проверка того, что данные об изменениях попали в таблицу users_audit
+--SELECT * FROM users_audit u ;
+
+-- Установка pg_cron
+CREATE EXTENSION IF NOT EXISTS "pg_cron";
+
+-- Создание функции, которая создает файл с данными за сутки
+CREATE OR REPLACE FUNCTION export_audit_to_csv() RETURNS void AS $outer$
+DECLARE
+	PATH TEXT := '/tmp/users_audit_export_' || to_char(NOW(), 'YYYYMMDD_HH24MI') || '.csv';
+BEGIN
+	EXECUTE format(
+		$inner$
+		COPY (
+			SELECT user_id, field_changed, old_value, new_value, changed_by, changed_at
+			FROM users_audit
+			WHERE changed_at >= NOW() - INTERVAL '1 day'
+			ORDER BY changed_at
+		) TO '%s' WITH CSV HEADER
+		$inner$, path
+	);
+END;
+$outer$ LANGUAGE plpgsql;
+
+-- Установка планировщика на 3 ночи, сработает в 6 утра
+SELECT cron.schedule(
+	job_name := 'daily_audit_export',
+	schedule := '0 3 * * *',
+	command := $$SELECT export_audit_to_csv()$$
+);
+
+-- Проверка того, что задача создалась
+SELECT * FROM cron.job;
+
+-- Ручной запуск задачи при необходимости
+-- SELECT export_audit_to_csv();
